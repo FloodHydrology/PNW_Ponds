@@ -17,5 +17,5 @@ library(raster)
 library(sf)
 
 #Define directories
-data_dir<-
-
+data_dir<-"/nfs/njones-data/Research Projects/"
+list.files(data_dir)
