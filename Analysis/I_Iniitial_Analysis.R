@@ -26,95 +26,126 @@ scratch_dir<-"C:\\ScratchWorkspace\\"
 wbt_dir<-"C:/WBT/whitebox_tools"
 
 #Load spatial data
-dem<-raster(paste0(data_dir, "raw_data/1m_DEM/msh2009dem")) #data source: https://pubs.er.usgs.gov/publication/ds904
+dem_1m<-raster(paste0(data_dir, "raw_data/1m_DEM/msh2009dem")) #data source: https://pubs.er.usgs.gov/publication/ds904
+dem_10m<-raster(paste0(data_dir, "raw_data/10m_DEM/msh2009dem10")) #data source: https://pubs.er.usgs.gov/publication/ds904
 ponds<-st_read(paste0(data_dir,"raw_data/pond_polygons_shape.shp")) #Emperical Data Collection 
-streams<-st_read(paste0(data_dir,"modified_data/NHDPlus_HR_FlowLines.shp")) #data source: https://www.usgs.gov/core-science-systems/ngp/national-hydrography/access-national-hydrography-products
-hillslopes<-st_read(paste0(data_dir,"modified_data/NHDPlusCatchment.shp")) #data source: https://www.usgs.gov/core-science-systems/ngp/national-hydrography/access-national-hydrography-products
-connectivity<-read.dbf(paste0(data_dir,"modified_data/NHDPlusFlow.dbf")) %>% as_tibble() #data source: https://www.usgs.gov/core-science-systems/ngp/national-hydrography/access-national-hydrography-products 
-  
-#Standardize CRS accross spatial datasets
-p<-st_crs(ponds)
-streams<-st_transform(streams, p)
-hillslopes<-st_transform(hillslopes, p)
-streams<-st_zm(streams)
-hillslopes<-st_zm(hillslopes)
 
-#2.0 Clip DEM to NHDPlus "Neighborhood"-----------------------------------------
-#Here, we are going to clip the DEM to relevant drainage basins. This involves 
-  #(1) selecting the NHDPlusCatchments (hillslopes) that intersect with the ponds, 
-  #(2) selecting the associated NHDStreamLine (stream), 
-  #(3) identifying upstream NHDPlusStreamLines, 
-  #(4) selecting NHDPlusCatchments that intersect those NHDPlusStreamLines, and 
-  #(5) clipping the DEM to those catchments. 
-#Notably, there's most definitely a better way to do all of this using graph theory. 
+#2.0 Prep 10m DEM for watershed delineation-------------------------------------
+#Steps: 
+  #(1) Filter DEM
+  #(2) Burn Ponds into Raster
+  #(3) Breach depressions
+  #(4) Flow direction analysis
+  #(5) Flow accumulation analysis
 
-#2.1 Select relevent hillslope and streamline areas~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#Select hillslopes that intersect with pond polygons
-h<-hillslopes[ponds,] 
+#2.1 Filter DEM-----------------------------------------------------------------
+#Export rater to scratch workspace
+writeRaster(dem_10m, paste0(scratch_dir,"dem.tif"), overwrite=T)
 
-#Select streams taht intersect with hillslopes
-s<-streams[h,] %>% 
-  as_tibble() %>% 
-  select(Permanent_) %>% 
-  rename(UID = Permanent_) %>%
-  mutate(UID = as.numeric(paste(UID))) %>%
-  na.omit()
+#fill missing data
+system(paste(paste(wbt_dir),
+             "-r=FillMissingData",
+             paste0("--wd=",scratch_dir),
+             "-i='dem.tif'", 
+             "-o='dem_gapfilled.tif",
+             "--filter=25"))
 
-#2.2 Select upstream streamlines~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#Create edge list
-connectivity <- connectivity %>% 
-  select(FromPermID, ToPermID) %>%
-  rename(FROM = FromPermID, 
-                TO = ToPermID) %>%
-  mutate(FROM = as.numeric(paste(FROM)), 
-                TO = as.numeric(paste(TO))) %>%
-  na.omit()
+#Fill Depressions and correct flat areas
+system(paste(paste(wbt_dir), 
+             "-r=FillDepressions", 
+             paste0("--wd=",scratch_dir),
+             "--dem='dem_gapfilled.tif'", 
+             "-o='dem_filled.tif'"))
 
-#Conduct while statement to find upstream stream reaches
-m<-nrow(s)
-while(m>0){
-  #Find upstream reaches
-  temp<-s %>%
-    rename(TO = UID) %>%
-    left_join(.,connectivity) %>%
-    select(FROM) %>%
-    filter(FROM>0) %>%
-    rename(UID=FROM) %>%
-    distinct(.)
-  
-  #Bind rows
-  s<-bind_rows(s,temp) %>% distinct(.)
-  
-  #Count number of upstream reaches.If same as last iteration, then kill the loop
-  if(nrow(s)==m){
-    m<-0}else{
-      m<-nrow(s)
-    }
-  print(m)
-}
+#2.2 Burn ponds into dem--------------------------------------------------------
+#Read DEM back in from scratch workspace
+dem<-raster(paste0(scratch_dir,"dem_filled.tif"))
 
-#2.3 Find upstream areas~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#Select upstream flowlines
-streams<-streams %>%
-  rename(UID = Permanent_) %>%
-  mutate(UID = as.numeric(paste(UID))) %>%
-  right_join(.,s)
+#Create DEM mask
+mask<-rasterize(ponds, dem, 1)
 
-#Intersect streams with hillslopes
-hillslopes<-hillslopes[streams, ] 
+#Create minimum raster
+dem_min<-mask*500 #Make the burn a constant elevation of 500 m
+dem_min[is.na(dem_min)]<-0
 
-#2.4 Crop DEM ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#Create mask
-mask<-st_union(hillslopes)
-mask<-st_buffer(mask, dist = 1000)
-mask<-as_Spatial(mask)
+#Replace masked location with min raster value
+dem_mask<-mask*0
+dem_mask[is.na(dem_mask)]<-1
+dem_burn<-dem*dem_mask+dem_min
 
-#Crop DEM
-dem<-crop(dem, mask)
-dem<-mask(dem, mask)
-remove(mask)
+#Cleanup workspace
+remove(list=c("dem","mask","dem_min",'dem_mask'))
 
-#3.0 Burn in wetlands-----------------------------------------------------------
+#2.3 Breach depressions---------------------------------------------------------
+#Export rater to scratch workspace
+writeRaster(dem_burn, paste0(scratch_dir,"dem.tif"), overwrite=T)
+
+#Breach Analysis of the DEM
+system(paste(paste(wbt_dir),
+             "-r=BreachDepressions",
+             paste0("--wd=",scratch_dir),
+             "--dem=dem.tif",
+             "-o=dem_breach.tif"))
+
+#2.4 Flow Accumulation and Flow Direction Anlaysis------------------------------
+#Flow Direction
+system(paste(paste(wbt_dir), 
+             "-r=D8Pointer", 
+             paste0("--wd=",scratch_dir),
+             "--dem='dem_breach.tif'", 
+             "-o='fdr.tif'",
+             "--out_type=sca"))
+
+#Flow Accumulation
+system(paste(paste(wbt_dir), 
+             "-r=DInfFlowAccumulation", 
+             paste0("--wd=",scratch_dir),
+             "--dem='dem_breach.tif'", 
+             "-o='fac.tif'",
+             "--out_type=sca"))
+
+#Read fac and fdr into R environment
+fac<-raster(paste0(scratch_dir,"fac.tif"))
+fdr<-raster(paste0(scratch_dir,"fdr.tif"))
+
+#3.0 Delineate entire upstream watershe for each pond---------------------------
+#Create function for delineation
+fun<-function(id){}
+
+#for testing
+id<-ponds$pond_id[1]
+
+#isolate pond
+pond<-ponds %>% filter(pond_id==id)
+
+#Add 10 m buffer (10 m comes from the resolutin of the raster)
+pond<-st_buffer(pond, 10)
+
+#Find max fac point within pond
+fac_pond<-crop(fac, as_Spatial(pond))
+fac_pond<-mask(fac_pond, as_Spatial(pond))
+
+#create pour point
+pp<-rasterToPoints(fac_pond) %>% 
+  #convert to tibble
+  as_tibble() %>%
+  #select point with max fac
+  filter(fac==max(fac))
+
+#Make pour point an sf shape
+pp<-st_as_sf(pp, coords = c("x", "y"), crs = st_crs(pond))
+
+#Export pour point to scratch workspace
+write_sf(pp, paste0(scratch_dir,"pp.shp"), delete_layer = T)
+
+#Delineate Watershed w/ WBT
+system(paste(paste(wbt_dir), 
+             "-r=Watershed", 
+             paste0("--wd=",scratch_dir),
+             "--d8_pntr='fdr.tif''", 
+             "--pour_pts='pp.shp'",
+             "-o='watershed.tif"))
+
 
 
 
