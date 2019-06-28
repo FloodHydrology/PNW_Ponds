@@ -1,8 +1,8 @@
-GIW_identification<-function(
+pond_identification<-function(
   dem=dem, 
   min_size=100, #number of cells (for now)
   iterations=100, #number of Monte Carlo iterations
-  dem_rmse=0.0607, #RMSE of 18.5 cm
+  dem_rmse=0.185, #RMSE of 18.5 cm
   workspace="C:\\ScratchWorkspace\\", 
   wbt_path="C:/WBT/whitebox_tools"){
   
@@ -21,19 +21,19 @@ GIW_identification<-function(
                "-o='dem_breachedsinglecells.tif'"))
   
   #Filter the DEM
-  system(paste(paste(wbt_path), 
-               "-r=EdgePreservingMeanFilter", 
+  system(paste(paste(wbt_path),
+               "-r=FastAlmostGaussianFilter",
                paste0("--wd=",workspace),
-               "-i='dem_breachedsinglecells.tif'", 
-               "-o='dem_edgepreservingfilter.tif'",
-               "filter=10", 
+               "-i='dem_breachedsinglecells.tif'",
+               "-o='dem_filter.tif'",
+               "sigma=1.8",
                "threshold=100"))
   
   #Identify depressions using WhiteBox GAT Monte Carlo Approach
   system(paste(paste(wbt_path),
                "-r=StochasticDepressionAnalysis", 
                paste0("--wd=",workspace),
-               "--dem='dem_edgepreservingfilter.tif'", 
+               "--dem='dem_filter.tif'", 
                "-o='depression.tif'",
                paste0("--rmse=",dem_rmse),
                paste0("--iterations=",iterations)))
