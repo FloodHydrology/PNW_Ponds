@@ -13,6 +13,7 @@ remove(list=ls())
 
 #download required packages
 library(foreign)
+library(stars)
 library(sf)
 library(raster)
 library(tidyverse)
@@ -109,42 +110,59 @@ fac<-raster(paste0(scratch_dir,"fac.tif"))
 fdr<-raster(paste0(scratch_dir,"fdr.tif"))
 
 #3.0 Delineate entire upstream watershe for each pond---------------------------
+#Create folder to export watershed shapefile too
+dir.create(paste0(data_dir, 'modified_data/watersheds'))
+
 #Create function for delineation
-fun<-function(id){}
+fun<-function(n){
 
-#for testing
-id<-ponds$pond_id[1]
+  #Define pond id
+  id<-ponds$pond_id[n]
+  
+  #isolate pond
+  pond<-ponds %>% filter(pond_id==id)
+  
+  #Add 10 m buffer (10 m comes from the resolutin of the raster)
+  pond<-st_buffer(pond, 10)
+  
+  #Find max fac point within pond
+  fac_pond<-crop(fac, as_Spatial(pond))
+  fac_pond<-mask(fac_pond, as_Spatial(pond))
+  
+  #create pour point
+  pp<-rasterToPoints(fac_pond) %>% 
+    #convert to tibble
+    as_tibble() %>%
+    #select point with max fac
+    filter(fac==max(fac))
+  
+  #Make pour point an sf shape
+  pp<-st_as_sf(pp, coords = c("x", "y"), crs = st_crs(pond))
+  
+  #Export pour point to scratch workspace
+  write_sf(pp, paste0(scratch_dir,"pp.shp"), delete_layer = T)
+  
+  #Delineate Watershed w/ WBT
+  system(paste(paste(wbt_dir), 
+               "-r=Watershed", 
+               paste0("--wd=",scratch_dir),
+               "--d8_pntr='fdr.tif''", 
+               "--pour_pts='pp.shp'",
+               "-o='watershed.tif"))
+  
+  #Read watershed in
+  w_grd<-raster(paste0(scratch_dir,"watershed.tif"))
+  
+  #Convert watershed to polygon
+  w_shp<- w_grd %>% st_as_stars() %>% st_as_sf(., merge = TRUE)
+  
+  #Add id info and write to output folder
+  w_shp$pond_id<-id
+  write_sf(w_shp, paste0(data_dir, "modified_data/watersheds/",id,".shp"))
+}
 
-#isolate pond
-pond<-ponds %>% filter(pond_id==id)
-
-#Add 10 m buffer (10 m comes from the resolutin of the raster)
-pond<-st_buffer(pond, 10)
-
-#Find max fac point within pond
-fac_pond<-crop(fac, as_Spatial(pond))
-fac_pond<-mask(fac_pond, as_Spatial(pond))
-
-#create pour point
-pp<-rasterToPoints(fac_pond) %>% 
-  #convert to tibble
-  as_tibble() %>%
-  #select point with max fac
-  filter(fac==max(fac))
-
-#Make pour point an sf shape
-pp<-st_as_sf(pp, coords = c("x", "y"), crs = st_crs(pond))
-
-#Export pour point to scratch workspace
-write_sf(pp, paste0(scratch_dir,"pp.shp"), delete_layer = T)
-
-#Delineate Watershed w/ WBT
-system(paste(paste(wbt_dir), 
-             "-r=Watershed", 
-             paste0("--wd=",scratch_dir),
-             "--d8_pntr='fdr.tif''", 
-             "--pour_pts='pp.shp'",
-             "-o='watershed.tif"))
+#Apply function (note, because you are using WBT, this has to be single threaded)
+lapply(fun, seq(1,nrow(ponds)))
 
 
 
