@@ -18,6 +18,7 @@ library(stars)
 library(sf)
 library(raster)
 library(tidyverse)
+library(parallel)
 
 #Load scripts
 source("R/pond_identification.R")
@@ -272,10 +273,11 @@ fun<-function(n){
 lapply(seq(1,nrow(ponds)),fun)
 
 #5.0 Inundation analysis--------------------------------------------------------
-#Create folder to export subshed shapefile too
+#Create folders to export bathymetric relationships and estimated inundation too
 dir.create(paste0(data_dir, 'modified_data/bathymetry_relationships'))
+dir.create(paste0(data_dir, 'modified_data/inundation/'))
 
-#Create function 
+#Create function to inundate ponds
 fun<-function(n){
   #Setup workspace~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   #Define pond id
@@ -335,15 +337,116 @@ fun<-function(n){
   }
   
   #Create function to calculate inundation area/volume
-  df<-lapply(seq(0,3,0.1),inundate)
+  df<-lapply(seq(0,3,0.01),inundate)
   df<-do.call(rbind, df)
   df<-data.frame(df)  
   colnames(df)<-c("z", "area","volume", 'area_inside', 'area_outside', "outflow_length")
   
   #Export to new csv file
   write_csv(df, paste0(data_dir,'modified_data/bathymetry_relationships/',id,".csv"))
+  
+  #Estimate max inundation based on emperical pond delineation~~~~~~~~~~~~~~~~~~
+  #Select stage where the number of "outside" cells and difference in area estimates
+  #(e.g., emperical vs modeled) is minimized  
+  df <- df %>%
+    mutate(pond_id = id,
+           area_percent_diff = abs(area-as.numeric(paste(st_area(pond))))/area*100, 
+           rank      = rank(area_percent_diff)) %>%
+    filter(rank<=15) %>%
+    arrange(rank) %>%
+    filter(area_outside == min(area_outside, na.rm=T))
+  
+  #if nrow(df)>1, then limit to lowest error
+  if(nrow(df)>1){df<-df[1,]}
+  
+  #Creat inundation shape and export 
+  inundation<-Con(dem>(dem_min+df$z),0,1) 
+  inundation[inundation==0]<-NA
+  inundation<-inundation %>% st_as_stars() %>% st_as_sf(., merge = TRUE)
+  st_write(inundation, paste0(data_dir, "modified_data/inundation/",id,'.shp'), delete_layer = T)
+
+  #Export metrics to global environment
+  df
 }
 
-#Apply function 
-lapply(seq(1,nrow(ponds)),fun)
+#Apply function in parallel (note, use mclapply if using a non-PC -- much easier!)
+t0<-Sys.time()
+n.cores<-detectCores()
+cl <- makePSOCKcluster(n.cores) #Create Clusters
+clusterEvalQ(cl, {library(fasterize)
+                  library(stars)
+                  library(sf)
+                  library(raster)
+                  library(tidyverse)})  #Send clusters the required libraries
+clusterExport(cl, c('fun', 'data_dir', 'ponds', 'dem_1m'), env=.GlobalEnv)  #Send Clusters function with the execute function
+x<-parLapply(cl, seq(1,nrow(ponds)), fun)  #Execute function
+stopCluster(cl)  #Turn clusters off
+tf<-Sys.time()
+tf-t0
 
+#Gather information
+output <- x %>% bind_rows(.) %>% select(pond_id, z, area, volume, area_percent_diff)
+
+#bind to ponds
+ponds<-ponds %>% 
+  left_join(.,output) %>% 
+  rename(pond_depth = z, 
+         pond_area =  area, 
+         pond_volume = volume)
+
+#6.0 Estimate Metrics-----------------------------------------------------------
+#Create function to estimate metrics for individual ponds
+fun<-function(n){
+  #Setup workspace~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  #Define pond id
+  id<-ponds$pond_id[n]
+  
+  #isolate pond
+  pond<-ponds %>% filter(pond_id==id)
+  
+  #isolate subshed
+  subshed<-st_read(paste0(data_dir,"modified_data/subsheds/",id,'.shp'))
+  
+  #Estimate metrics from watershed delineations~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  #Read watershed/subshed shapefiles
+  subshed<-read_sf(paste0(data_dir, 'modified_data/subsheds/',id,".shp")) %>%
+    st_union(.)
+  watershed<-read_sf(paste0(data_dir, 'modified_data/watersheds/',id,".shp"))
+  
+  #Estiamte pond metrics~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  subshed_area<-st_area(subshed)
+  pond_specific_volume<-as.numeric(paste(pond$pond_volume/subshed_area))
+  
+  #Estimate total watershed metrics~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  watershed_area<-st_area(watershed)
+  ponds_watershed<-ponds[watershed,]
+  total_pond_area<-sum(ponds_watershed$pond_area, na.rm=T)
+  total_pond_volume<-sum(ponds_watershed$pond_volume, na.rm = T)
+  total_pond_specific_volume<-as.numeric(paste(total_pond_volume/watershed_area))
+  
+  #Estimate upstream watershed metrics~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  upstream_watershed_area<-watershed_area-subshed_area
+  upstream_pond_area<-total_pond_area- pond$pond_area
+  upstream_pond_volume<-total_pond_volume - pond$pond_volume
+  upstream_pond_specific_volume<-as.numeric(paste(upstream_pond_volume/upstream_watershed_area))
+    upstream_pond_specific_volume[is.na(upstream_pond_specific_volume)]<-0
+  
+  #Export results
+  tibble(pond_id = id, 
+         subshed_area, pond_specific_volume,
+         upstream_watershed_area, upstream_pond_area, upstream_pond_volume, upstream_pond_specific_volume,
+         watershed_area, total_pond_area, total_pond_volume, total_pond_specific_volume)
+}
+
+#apply function
+output<-lapply(seq(1, nrow(ponds)), fun) %>% bind_rows(.) 
+
+#join to pond dataset
+ponds<-left_join(ponds, output)
+
+#Export outputs
+dir.create(paste0(data_dir, 'output/'))
+st_write(ponds, paste0(data_dir,"output/ponds.shp"))
+output<-as_tibble(ponds) %>% select(-geometry)
+write_csv(output, paste0(data_dir,"output/ponds_metrics.csv"))
+  
