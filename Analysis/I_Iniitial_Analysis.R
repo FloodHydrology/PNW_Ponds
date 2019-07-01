@@ -271,9 +271,79 @@ fun<-function(n){
 #Apply function 
 lapply(seq(1,nrow(ponds)),fun)
 
+#5.0 Inundation analysis--------------------------------------------------------
+#Create folder to export subshed shapefile too
+dir.create(paste0(data_dir, 'modified_data/bathymetry_relationships'))
 
-#5.0 Estimate Pond Hydrogeomorphic Characteristics------------------------------
+#Create function 
+fun<-function(n){
+  #Setup workspace~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  #Define pond id
+  id<-ponds$pond_id[n]
+  
+  #isolate pond
+  pond<-ponds %>% filter(pond_id==id)
+  
+  #isolate subshed
+  subshed<-st_read(paste0(data_dir,"modified_data/subsheds/",id,'.shp'))
+  
+  #Crop dem
+  dem<-crop(dem_1m, as_Spatial(subshed))
+  dem<-mask(dem, as_Spatial(subshed))
+  
+  #Inundate Analysis~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  #Create Minimum Raster
+  dem_min<-dem*0+minValue(dem)
+  dem_min@crs<-dem@crs
+  
+  #Create minimum point
+  pnt_min<-cellStats(dem, min)
+  pnt_min<-rasterToPoints(dem,spatial=T, fun=function(x) x ==pnt_min)
+  
+  #Create function to return conditional raster
+  Con<-function(condition, trueValue, falseValue){
+    return(condition * trueValue + (!condition)*falseValue)
+  }
+  
+  #Create function to calcluate inundation area, volume, and spill boundary length
+  inundate<-function(z){
+    
+    #define inundated area [area connected to pnt_min]
+    area<-Con(dem>(dem_min+z),0,1)
+    group<-raster::extract(x=area, y=pnt_min)
+    area[area!=group]<-0
+    area[area==group]<-1
+    
+    #Create metrics to estimate area, volume, and spill boundary length
+    volume<-(((z+dem)-dem_min)*area)*res(area)[1]*res(area)[2]
+    outflow<-cellStats(area*boundaries(dem_min, type="inner"), 'sum')
+    
+    #Estimate number of inundated cells within delineated pond boundary
+    mask_inside<-fasterize(pond, dem)
+    mask_outside<-mask_inside*0
+    mask_outside[is.na(mask_outside)]<-1
+    inside<-mask_inside*area
+    outside<-mask_outside*area
+    
+    #Export Data
+    c(z, #inundation depth
+      cellStats(area, 'sum')*res(area)[1]*res(area)[2], #area (m^2)
+      cellStats(volume, 'sum'), #volume (m^3)
+      cellStats(inside, 'sum'), #area inside of delineated pond
+      cellStats(outside, 'sum'), #area outside of the delineated pond
+      outflow) #Outflow length (increments = raster cell resolution)
+  }
+  
+  #Create function to calculate inundation area/volume
+  df<-lapply(seq(0,3,0.1),inundate)
+  df<-do.call(rbind, df)
+  df<-data.frame(df)  
+  colnames(df)<-c("z", "area","volume", 'area_inside', 'area_outside', "outflow_length")
+  
+  #Export to new csv file
+  write_csv(df, paste0(data_dir,'modified_data/bathymetry_relationships/',id,".csv"))
+}
 
-
-
+#Apply function 
+lapply(seq(1,nrow(ponds)),fun)
 
