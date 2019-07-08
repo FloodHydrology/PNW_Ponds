@@ -20,9 +20,6 @@ library(raster)
 library(tidyverse)
 library(parallel)
 
-#Load scripts
-source("R/pond_identification.R")
-
 #Define directories
 data_dir<-"//storage.research.sesync.org/njones-data/Research Projects/PNW_Ponds/spatial_data/"
 scratch_dir<-"C:\\ScratchWorkspace\\"
