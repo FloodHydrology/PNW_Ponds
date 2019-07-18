@@ -156,6 +156,9 @@ fun<-function(n){
   #Convert watershed to polygon
   w_shp<- w_grd %>% st_as_stars() %>% st_as_sf(., merge = TRUE)
   
+  #Export watershed shp
+  write_sf(w_shp, paste0(data_dir, "modified_data/watersheds/",id,"_low_res.shp"), delete_layer = T)
+  
   #Step 2: Re-delineate watershed with high res DEM~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   
   #Clip high resolution DEM with w_shp
