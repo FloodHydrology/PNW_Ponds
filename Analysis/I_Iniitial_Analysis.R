@@ -85,6 +85,7 @@ system(paste(paste(wbt_dir),
              "-r=BreachDepressions",
              paste0("--wd=",scratch_dir),
              "--dem=dem.tif",
+             "--flat_increment=.001", 
              "-o=dem_breach.tif"))
 
 #2.4 Flow Accumulation and Flow Direction Anlaysis------------------------------
@@ -173,6 +174,7 @@ fun<-function(n){
                "-r=BreachDepressions",
                paste0("--wd=",scratch_dir),
                "--dem=dem_hr.tif",
+               "--flat_increment=.001", 
                "-o=dem_breach_hr.tif"))
   
   #Flow Direction
@@ -446,7 +448,7 @@ ponds<-left_join(ponds, output)
 
 #Export outputs
 dir.create(paste0(data_dir, 'output/'))
-st_write(ponds, paste0(data_dir,"output/ponds.shp"))
+st_write(ponds, paste0(data_dir,"output/ponds.shp"), delete_layer = T)
 output<-as_tibble(ponds) %>% select(-geometry)
 write_csv(output, paste0(data_dir,"output/ponds_metrics.csv"))
   
